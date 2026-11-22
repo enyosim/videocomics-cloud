@@ -1,0 +1,13 @@
+{
+  "name": "videocomics-cloud",
+  "version": "1.0.0",
+  "description": "Motor de renderizado distribuido en la nube para VIDEOCOMICS",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "render": "node scripts/cloud-render.mjs"
+  },
+  "dependencies": {
+    "playwright-core": "^1.51.0"
+  }
+}

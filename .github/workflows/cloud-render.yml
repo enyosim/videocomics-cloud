@@ -1,0 +1,449 @@
+name: Renderizar Vídeo (VIDEOCOMICS Cloud)
+
+on:
+  workflow_dispatch:
+    inputs:
+      archivo:
+        description: 'Nombre del .videocomics en "cola-render" (déjalo vacío para tomar el más antiguo en cola)'
+        required: false
+        default: ''
+        type: string
+      fps:
+        description: 'Fotogramas por segundo'
+        required: false
+        default: 'proyecto'
+        type: choice
+        options:
+          - proyecto
+          - '60'
+          - '30'
+      calidad:
+        description: 'Velocidad / calidad de codificación H.264'
+        required: false
+        default: 'equilibrada'
+        type: choice
+        options:
+          - equilibrada
+          - rapida
+          - maxima
+      paralelismo:
+        description: 'Servidores en paralelo (6-8 recomendado para máxima velocidad)'
+        required: false
+        default: '6'
+        type: choice
+        options:
+          - '6'
+          - '8'
+          - '4'
+          - '2'
+          - '1'
+      borrar_temporal:
+        description: 'Eliminar el .videocomics de "cola-render" cuando el MP4 se suba a "videos-listos"'
+        required: false
+        default: true
+        type: boolean
+
+  release:
+    types: [published, edited]
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  preparar:
+    name: 1. Preparar proyecto, intro y audio
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'release' && github.event.release.tag_name == 'cola-render')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      asset_name: ${{ steps.download.outputs.asset_name }}
+      asset_pattern: ${{ steps.download.outputs.asset_pattern }}
+      output_name: ${{ steps.download.outputs.output_name }}
+      preset: ${{ steps.plan.outputs.preset }}
+      crf: ${{ steps.plan.outputs.crf }}
+      chunks_json: ${{ steps.plan.outputs.chunks_json }}
+      has_chunks: ${{ steps.plan.outputs.has_chunks }}
+      should_run: ${{ steps.download.outputs.should_run }}
+
+    steps:
+      - name: Clonar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Verificar FFmpeg
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y ffmpeg
+          fi
+          ffmpeg -version | head -n 1
+
+      - name: Localizar y descargar proyecto .videocomics desde Release "cola-render"
+        id: download
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_FILE: ${{ inputs.archivo || '' }}
+        run: |
+          set -euo pipefail
+          mkdir -p cloud_work
+
+          if ! gh release view cola-render >/dev/null 2>&1; then
+            echo "Creando Release inicial 'cola-render'..."
+            gh release create cola-render \
+              --title "Cola de renderizado (.videocomics)" \
+              --notes "Sube aquí tus archivos .videocomics para renderizarlos automáticamente y sin consumir recursos locales." || true
+          fi
+
+          if ! gh release view videos-listos >/dev/null 2>&1; then
+            echo "Creando Release de destino 'videos-listos'..."
+            gh release create videos-listos \
+              --title "Vídeos listos (VIDEOCOMICS)" \
+              --notes "Vídeos MP4 1080p renderizados automáticamente en la nube con GitHub Actions." || true
+          fi
+
+          ASSETS_JSON="$(gh release view cola-render --json assets)"
+
+          ASSET_INFO="$(node -e '
+            const data = JSON.parse(process.argv[1]);
+            const requested = (process.env.INPUT_FILE || "").trim();
+            const files = (data.assets || []).filter((a) =>
+              (a.name || "").toLowerCase().endsWith(".videocomics")
+            );
+            if (files.length === 0) {
+              console.log("No hay ningún archivo .videocomics pendiente en cola-render.");
+              process.stdout.write(JSON.stringify({ should_run: false, count: 0 }));
+              process.exit(0);
+            }
+            let picked = null;
+            if (requested) {
+              const reqLower = requested.toLowerCase();
+              const reqDots = reqLower.replace(/\s+/g, ".");
+              picked = files.find((a) => {
+                const n = a.name.toLowerCase();
+                const l = (a.label || "").toLowerCase();
+                return n === reqLower || n === reqDots || l === reqLower;
+              });
+              if (!picked) {
+                console.error("::error::No se encontró \"" + requested + "\" en cola-render. Disponibles: " + files.map((f) => f.name).join(", "));
+                process.exit(1);
+              }
+            } else {
+              // Orden FIFO: procesa primero el que lleva más tiempo en la cola
+              files.sort((a, b) => new Date(a.createdAt || a.updatedAt).getTime() - new Date(b.createdAt || b.updatedAt).getTime());
+              picked = files[0];
+            }
+            const globPattern = picked.name.replace(/([*?\[\]\\])/g, "\\$1");
+            const outName = picked.name.replace(/\.videocomics$/i, "") + ".mp4";
+            process.stdout.write(JSON.stringify({
+              should_run: true,
+              name: picked.name,
+              pattern: globPattern,
+              outName: outName,
+              count: files.length
+            }));
+          ' "$ASSETS_JSON")"
+
+          SHOULD_RUN="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).should_run ? "true" : "false")' "$ASSET_INFO")"
+          if [ "$SHOULD_RUN" = "false" ]; then
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "has_chunks=false" >> "$GITHUB_OUTPUT"
+            echo "chunks_json=[]" >> "$GITHUB_OUTPUT"
+            echo "Sin archivos pendientes en cola-render. Omitiendo renderizado."
+            exit 0
+          fi
+
+          ASSET_NAME="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).name)' "$ASSET_INFO")"
+          ASSET_PATTERN="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).pattern)' "$ASSET_INFO")"
+          OUTPUT_NAME="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).outName)' "$ASSET_INFO")"
+          PENDING_COUNT="$(node -e 'process.stdout.write(String(JSON.parse(process.argv[1]).count))' "$ASSET_INFO")"
+
+          {
+            echo "should_run=true"
+            echo "asset_name=$ASSET_NAME"
+            echo "asset_pattern=$ASSET_PATTERN"
+            echo "input_path=cloud_work/$ASSET_NAME"
+            echo "output_name=$OUTPUT_NAME"
+            echo "pending_total=$PENDING_COUNT"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Descargando proyecto: $ASSET_NAME"
+          gh release download cola-render --pattern "$ASSET_PATTERN" --dir cloud_work --clobber
+
+      - name: Instalar dependencias (playwright-core)
+        if: steps.download.outputs.should_run != 'false'
+        run: |
+          npm install --legacy-peer-deps
+
+      - name: Preparar audio maestro, intro FFmpeg y plan de fragmentos
+        if: steps.download.outputs.should_run != 'false'
+        id: plan
+        env:
+          INPUT_PATH: ${{ steps.download.outputs.input_path }}
+          INPUT_FPS: ${{ inputs.fps || 'proyecto' }}
+          INPUT_QUALITY: ${{ inputs.calidad || 'equilibrada' }}
+          INPUT_CHUNKS: ${{ inputs.paralelismo || '6' }}
+        run: |
+          set -euo pipefail
+          mkdir -p cloud_prep
+          PRESET="veryfast"
+          CRF="18"
+          if [ "$INPUT_QUALITY" = "rapida" ]; then
+            PRESET="superfast"
+            CRF="19"
+          elif [ "$INPUT_QUALITY" = "maxima" ]; then
+            PRESET="fast"
+            CRF="16"
+          fi
+
+          FPS_ARGS=()
+          if [ "$INPUT_FPS" = "30" ] || [ "$INPUT_FPS" = "60" ]; then
+            FPS_ARGS+=(--fps "$INPUT_FPS")
+          fi
+
+          node scripts/cloud-render.mjs \
+            --mode prepare \
+            --input "$INPUT_PATH" \
+            --work-dir cloud_prep \
+            --plan cloud_prep/plan.json \
+            --chunks "$INPUT_CHUNKS" \
+            --quality "$INPUT_QUALITY" \
+            --preset "$PRESET" \
+            --crf "$CRF" \
+            "${FPS_ARGS[@]}"
+
+          CHUNKS_JSON="$(node -e 'const p = JSON.parse(require("node:fs").readFileSync("cloud_prep/plan.json","utf8")); process.stdout.write(JSON.stringify(p.chunks.map(c => c.index)));')"
+          HAS_CHUNKS="$(node -e 'const p = JSON.parse(require("node:fs").readFileSync("cloud_prep/plan.json","utf8")); process.stdout.write(p.chunks.length > 0 ? "true" : "false");')"
+
+          {
+            echo "preset=$PRESET"
+            echo "crf=$CRF"
+            echo "chunks_json=$CHUNKS_JSON"
+            echo "has_chunks=$HAS_CHUNKS"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Compartir archivos de preparación con los servidores paralelos
+        if: steps.download.outputs.should_run != 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-prep
+          path: |
+            cloud_prep/plan.json
+            cloud_prep/audio.m4a
+            cloud_prep/part_intro.mp4
+            cloud_prep/intro_last.jpg
+          retention-days: 1
+          if-no-files-found: ignore
+
+  renderizar-fragmento:
+    name: 2. Fragmento ${{ matrix.chunk_index }}
+    needs: preparar
+    if: needs.preparar.outputs.should_run != 'false' && needs.preparar.outputs.has_chunks == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: true
+      matrix:
+        chunk_index: ${{ fromJson(needs.preparar.outputs.chunks_json || '[]') }}
+
+    steps:
+      - name: Clonar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Instalar FFmpeg
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y ffmpeg
+          fi
+
+      - name: Instalar dependencias (playwright-core)
+        run: |
+          npm install --legacy-peer-deps
+
+      - name: Descargar artefactos de preparación (plan + intro)
+        uses: actions/download-artifact@v4
+        with:
+          name: cloud-prep
+          path: .
+
+      - name: Descargar proyecto .videocomics desde "cola-render"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSET_PATTERN: ${{ needs.preparar.outputs.asset_pattern }}
+        run: |
+          set -euo pipefail
+          mkdir -p cloud_work
+          gh release download cola-render --pattern "$ASSET_PATTERN" --dir cloud_work --clobber
+
+      - name: Renderizar fragmento #${{ matrix.chunk_index }}
+        env:
+          ASSET_NAME: ${{ needs.preparar.outputs.asset_name }}
+          CHUNK_INDEX: ${{ matrix.chunk_index }}
+          PRESET: ${{ needs.preparar.outputs.preset }}
+          CRF: ${{ needs.preparar.outputs.crf }}
+        run: |
+          set -euo pipefail
+          mkdir -p cloud_parts
+          node scripts/cloud-render.mjs \
+            --mode chunk \
+            --input "cloud_work/$ASSET_NAME" \
+            --work-dir cloud_prep \
+            --plan cloud_prep/plan.json \
+            --chunk-index "$CHUNK_INDEX" \
+            --preset "$PRESET" \
+            --crf "$CRF" \
+            --output "cloud_parts/part_chunk_${CHUNK_INDEX}.mp4"
+
+      - name: Subir fragmento #${{ matrix.chunk_index }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-part-${{ matrix.chunk_index }}
+          path: cloud_parts/part_chunk_${{ matrix.chunk_index }}.mp4
+          retention-days: 1
+
+  ensamblar:
+    name: 3. Ensamblar MP4 final y publicar
+    needs: [preparar, renderizar-fragmento]
+    if: always() && needs.preparar.result == 'success' && needs.preparar.outputs.should_run != 'false' && (needs.renderizar-fragmento.result == 'success' || needs.renderizar-fragmento.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Clonar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Instalar FFmpeg
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y ffmpeg
+          fi
+
+      - name: Descargar artefacto de preparación (plan + audio + intro)
+        uses: actions/download-artifact@v4
+        with:
+          name: cloud-prep
+          path: .
+
+      - name: Descargar todos los fragmentos de vídeo
+        if: needs.preparar.outputs.has_chunks == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cloud-part-*
+          merge-multiple: true
+          path: cloud_prep
+
+      - name: Ensamblar MP4 final sin recodificar (-c copy)
+        env:
+          OUTPUT_NAME: ${{ needs.preparar.outputs.output_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p cloud_out
+          node scripts/cloud-render.mjs \
+            --mode assemble \
+            --work-dir cloud_prep \
+            --plan cloud_prep/plan.json \
+            --output "cloud_out/$OUTPUT_NAME" \
+            --summary-json cloud_out/summary.json
+
+      - name: Subir MP4 terminado al Release "videos-listos"
+        id: upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUTPUT_NAME: ${{ needs.preparar.outputs.output_name }}
+        run: |
+          set -euo pipefail
+          if ! gh release view videos-listos >/dev/null 2>&1; then
+            gh release create videos-listos \
+              --title "Vídeos listos (VIDEOCOMICS)" \
+              --notes "Vídeos MP4 1080p renderizados automáticamente en la nube con GitHub Actions."
+          fi
+
+          gh release upload videos-listos "cloud_out/$OUTPUT_NAME" --clobber
+
+          RELEASE_URL="$(gh release view videos-listos --json url --jq .url)"
+          echo "release_url=$RELEASE_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Limpiar archivo .videocomics temporal de "cola-render"
+        if: inputs.borrar_temporal != false && inputs.borrar_temporal != 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSET_NAME: ${{ needs.preparar.outputs.asset_name }}
+        run: |
+          set -euo pipefail
+          gh release delete-asset cola-render "$ASSET_NAME" --yes || true
+
+      - name: Resumen del renderizado
+        env:
+          RELEASE_URL: ${{ steps.upload.outputs.release_url }}
+          CLEANED: ${{ (inputs.borrar_temporal != false && inputs.borrar_temporal != 'false') && 'true' || 'false' }}
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const summary = JSON.parse(fs.readFileSync("cloud_out/summary.json", "utf8"));
+            const mins = Math.floor(summary.totalDuration / 60);
+            const secs = Math.round(summary.totalDuration % 60);
+            const durText = `${mins}:${String(secs).padStart(2, "0")}`;
+            const wallMins = Math.floor(summary.renderWallSeconds / 60);
+            const wallSecs = Math.round(summary.renderWallSeconds % 60);
+            const wallText = wallMins > 0 ? `${wallMins}m ${wallSecs}s` : `${wallSecs}s`;
+            const md = [
+              "## Vídeo renderizado correctamente",
+              "",
+              `- **Archivo MP4:** \`${summary.outputFilename}\``,
+              `- **Resolución:** ${summary.width}×${summary.height} (${summary.aspectRatio}) a **${summary.fps} fps**`,
+              `- **Duración del vídeo:** ${durText} (${summary.totalFrames} fotogramas)`,
+              `- **Fragmentos paralelos:** ${summary.chunks} servidores`,
+              `- **Tamaño final:** ${summary.fileSizeMB} MB`,
+              `- **Tiempo total de pared:** ${wallText}`,
+              `- **Descarga directa:** [Abrir Release videos-listos](${process.env.RELEASE_URL})`,
+              process.env.CLEANED === "true"
+                ? `- **Limpieza:** Se eliminó \`${summary.inputFilename}\` de \`cola-render\`.`
+                : `- **Limpieza:** Se conservó \`${summary.inputFilename}\` en \`cola-render\`.`,
+            ].join("\n");
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, md + "\n");
+          '
+
+      - name: Encadenar siguiente vídeo de "cola-render" si quedan pendientes
+        if: always() && steps.upload.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_FPS: ${{ inputs.fps || 'proyecto' }}
+          INPUT_QUALITY: ${{ inputs.calidad || 'equilibrada' }}
+          INPUT_PARALLELISM: ${{ inputs.paralelismo || '6' }}
+          INPUT_CLEAN: ${{ (inputs.borrar_temporal != false && inputs.borrar_temporal != 'false') && 'true' || 'false' }}
+        run: |
+          set -euo pipefail
+          REMAINING_JSON="$(gh release view cola-render --json assets)"
+          PENDING_COUNT="$(node -e '
+            const data = JSON.parse(process.argv[1]);
+            const files = (data.assets || []).filter((a) =>
+              (a.name || "").toLowerCase().endsWith(".videocomics")
+            );
+            process.stdout.write(String(files.length));
+          ' "$REMAINING_JSON")"
+
+          echo "Vídeos restantes en cola-render: $PENDING_COUNT"
+          if [ "$PENDING_COUNT" -gt 0 ]; then
+            echo "Hay $PENDING_COUNT vídeo(s) restante(s) en cola-render. Disparando siguiente renderizado automáticamente..."
+            gh workflow run cloud-render.yml \
+              --ref "${GITHUB_REF_NAME:-main}" \
+              -f fps="$INPUT_FPS" \
+              -f calidad="$INPUT_QUALITY" \
+              -f paralelismo="$INPUT_PARALLELISM" \
+              -f borrar_temporal="$INPUT_CLEAN" || true
+          else
+            echo "Todos los vídeos de cola-render han sido procesados."
+          fi
