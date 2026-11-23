@@ -12,9 +12,10 @@ Al ser un repositorio público, el renderizado con **GitHub Actions es 100% grat
    - Ve a la pestaña **[Releases](https://github.com/enyosim/videocomics-cloud/releases)**.
    - Abre el Release **`cola-render`**.
    - Haz clic en *Edit release* y sube uno o varios archivos `.videocomics`. Guarda los cambios.
-2. **Renderizado automático:**
-   - GitHub Actions se activará automáticamente al guardar el Release o puedes iniciarlo manualmente desde la pestaña **Actions**.
-   - El motor divide el proyecto en **6 a 8 fragmentos paralelos** usando Chrome Headless y WebCodecs.
+2. **Iniciar renderizado cuando estés listo:**
+   - Ve a la pestaña **[Actions](https://github.com/enyosim/videocomics-cloud/actions)**.
+   - Selecciona **Renderizar Vídeo (VIDEOCOMICS Cloud)** y pulsa el botón **Run workflow**.
+   - El motor procesará automáticamente todos los archivos en la cola uno tras otro, dividiendo cada uno en **6 a 8 servidores paralelos** con WebCodecs.
    - Ensambla el MP4 final a 1080p sin recodificar en cuestión de segundos.
 3. **Descarga del vídeo:**
    - Los vídeos terminados se publican directamente en el Release **`videos-listos`**.

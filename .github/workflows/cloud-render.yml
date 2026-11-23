@@ -43,9 +43,6 @@ on:
         default: true
         type: boolean
 
-  release:
-    types: [published, edited]
-
 permissions:
   contents: write
   actions: write
@@ -53,7 +50,6 @@ permissions:
 jobs:
   preparar:
     name: 1. Preparar proyecto, intro y audio
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'release' && github.event.release.tag_name == 'cola-render')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
