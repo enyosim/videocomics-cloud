@@ -71,12 +71,11 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Verificar FFmpeg
-        run: |
-          if ! command -v ffmpeg >/dev/null 2>&1; then
-            sudo apt-get update && sudo apt-get install -y ffmpeg
-          fi
-          ffmpeg -version | head -n 1
+      - name: Instalar FFmpeg estático (ultrarrápido)
+        uses: FedericoCarboni/setup-ffmpeg@v3
+        with:
+          ffmpeg-version: release
+          token: ${{ github.token }}
 
       - name: Localizar y descargar proyecto .videocomics desde Release "cola-render"
         id: download
@@ -169,10 +168,12 @@ jobs:
           echo "Descargando proyecto: $ASSET_NAME"
           gh release download cola-render --pattern "$ASSET_PATTERN" --dir cloud_work --clobber
 
-      - name: Instalar dependencias (playwright-core)
+      - name: Verificar dependencias (playwright-core)
         if: steps.download.outputs.should_run != 'false'
         run: |
-          npm install --legacy-peer-deps
+          if [ ! -d "node_modules/playwright-core" ]; then
+            npm install --legacy-peer-deps
+          fi
 
       - name: Preparar audio maestro, intro FFmpeg y plan de fragmentos
         if: steps.download.outputs.should_run != 'false'
@@ -185,6 +186,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p cloud_prep
+
+          # Guardar binario FFmpeg en cloud_prep para compartir con los servidores paralelos sin reinstalar
+          FFMPEG_BIN="$(command -v ffmpeg || echo '')"
+          if [ -n "$FFMPEG_BIN" ]; then
+            cp "$FFMPEG_BIN" cloud_prep/ffmpeg
+            chmod +x cloud_prep/ffmpeg
+          fi
+
           PRESET="veryfast"
           CRF="18"
           if [ "$INPUT_QUALITY" = "rapida" ]; then
@@ -231,6 +240,7 @@ jobs:
             cloud_prep/audio.m4a
             cloud_prep/part_intro.mp4
             cloud_prep/intro_last.jpg
+            cloud_prep/ffmpeg
           retention-days: 1
           if-no-files-found: ignore
 
@@ -254,21 +264,22 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Instalar FFmpeg
-        run: |
-          if ! command -v ffmpeg >/dev/null 2>&1; then
-            sudo apt-get update && sudo apt-get install -y ffmpeg
-          fi
-
-      - name: Instalar dependencias (playwright-core)
-        run: |
-          npm install --legacy-peer-deps
-
-      - name: Descargar artefactos de preparación (plan + intro)
+      - name: Descargar artefactos de preparación (plan + intro + ffmpeg)
         uses: actions/download-artifact@v4
         with:
           name: cloud-prep
           path: cloud_prep
+
+      - name: Activar FFmpeg del paquete
+        run: |
+          if [ -f "cloud_prep/ffmpeg" ]; then
+            chmod +x cloud_prep/ffmpeg
+            echo "$PWD/cloud_prep" >> "$GITHUB_PATH"
+          fi
+          # Fallback de seguridad en caso de que falte el binario
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y ffmpeg
+          fi
 
       - name: Descargar proyecto .videocomics desde "cola-render"
         env:
@@ -327,17 +338,22 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Instalar FFmpeg
-        run: |
-          if ! command -v ffmpeg >/dev/null 2>&1; then
-            sudo apt-get update && sudo apt-get install -y ffmpeg
-          fi
-
-      - name: Descargar artefacto de preparación (plan + audio + intro)
+      - name: Descargar artefacto de preparación (plan + audio + intro + ffmpeg)
         uses: actions/download-artifact@v4
         with:
           name: cloud-prep
           path: cloud_prep
+
+      - name: Activar FFmpeg del paquete
+        run: |
+          if [ -f "cloud_prep/ffmpeg" ]; then
+            chmod +x cloud_prep/ffmpeg
+            echo "$PWD/cloud_prep" >> "$GITHUB_PATH"
+          fi
+          # Fallback de seguridad en caso de que falte el binario
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y ffmpeg
+          fi
 
       - name: Descargar todos los fragmentos de vídeo
         if: needs.preparar.outputs.has_chunks == 'true'

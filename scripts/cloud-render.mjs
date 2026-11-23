@@ -180,10 +180,28 @@ function writeStreamWithDrain(stream, buffer) {
   });
 }
 
+function resolveFfmpegBin() {
+  const localCandidates = [
+    path.join(process.cwd(), 'cloud_prep', 'ffmpeg'),
+    path.join(process.cwd(), 'bin', 'ffmpeg'),
+    path.join(process.cwd(), 'ffmpeg'),
+  ];
+  for (const c of localCandidates) {
+    if (fs.existsSync(c)) {
+      try {
+        fs.chmodSync(c, 0o755);
+      } catch {}
+      return c;
+    }
+  }
+  return 'ffmpeg';
+}
+
 function runFfmpegOnce(ffArgs) {
   return new Promise((resolve, reject) => {
     let stderr = '';
-    const proc = spawn('ffmpeg', ffArgs, { stdio: ['ignore', 'ignore', 'pipe'] });
+    const ffmpegBin = resolveFfmpegBin();
+    const proc = spawn(ffmpegBin, ffArgs, { stdio: ['ignore', 'ignore', 'pipe'] });
     proc.stderr.on('data', (d) => {
       stderr += d.toString('utf8');
     });
@@ -809,7 +827,7 @@ async function runChunk(args) {
           partPath,
         ];
 
-        const proc = spawn('ffmpeg', ffArgs, { stdio: ['pipe', 'ignore', 'pipe'] });
+        const proc = spawn(resolveFfmpegBin(), ffArgs, { stdio: ['pipe', 'ignore', 'pipe'] });
         const workerState = {
           partPath,
           proc,
