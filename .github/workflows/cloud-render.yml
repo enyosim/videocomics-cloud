@@ -272,7 +272,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: cloud-prep
-          path: .
+          path: cloud_prep
 
       - name: Descargar proyecto .videocomics desde "cola-render"
         env:
@@ -291,7 +291,13 @@ jobs:
           CRF: ${{ needs.preparar.outputs.crf }}
         run: |
           set -euo pipefail
-          mkdir -p cloud_parts
+          mkdir -p cloud_parts cloud_prep
+          if [ -f "plan.json" ] && [ ! -f "cloud_prep/plan.json" ]; then
+            cp -f plan.json intro_last.jpg cloud_prep/ 2>/dev/null || true
+          fi
+          if [ -d "cloud_prep/cloud_prep" ]; then
+            cp -rn cloud_prep/cloud_prep/* cloud_prep/ 2>/dev/null || true
+          fi
           node scripts/cloud-render.mjs \
             --mode chunk \
             --input "cloud_work/$ASSET_NAME" \
@@ -335,7 +341,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: cloud-prep
-          path: .
+          path: cloud_prep
 
       - name: Descargar todos los fragmentos de vídeo
         if: needs.preparar.outputs.has_chunks == 'true'
@@ -350,7 +356,13 @@ jobs:
           OUTPUT_NAME: ${{ needs.preparar.outputs.output_name }}
         run: |
           set -euo pipefail
-          mkdir -p cloud_out
+          mkdir -p cloud_out cloud_prep
+          if [ -f "plan.json" ] && [ ! -f "cloud_prep/plan.json" ]; then
+            cp -f plan.json audio.m4a part_intro.mp4 intro_last.jpg cloud_prep/ 2>/dev/null || true
+          fi
+          if [ -d "cloud_prep/cloud_prep" ]; then
+            cp -rn cloud_prep/cloud_prep/* cloud_prep/ 2>/dev/null || true
+          fi
           node scripts/cloud-render.mjs \
             --mode assemble \
             --work-dir cloud_prep \

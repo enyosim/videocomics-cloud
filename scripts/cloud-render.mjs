@@ -651,7 +651,25 @@ async function runChunk(args) {
   }
   const workDir = args.workDir || path.dirname(args.plan || args.output || '.');
   fs.mkdirSync(workDir, { recursive: true });
-  const planPath = args.plan || path.join(workDir, 'plan.json');
+
+  const findFileFallback = (primaryPath, filename) => {
+    if (primaryPath && fs.existsSync(primaryPath)) return primaryPath;
+    const candidates = [
+      path.join(workDir, filename),
+      path.join(process.cwd(), 'cloud_prep', filename),
+      path.join(process.cwd(), filename),
+      path.join(workDir, 'cloud_prep', filename),
+    ];
+    for (const cand of candidates) {
+      if (fs.existsSync(cand)) return cand;
+    }
+    return primaryPath;
+  };
+
+  const planPath = findFileFallback(args.plan || path.join(workDir, 'plan.json'), 'plan.json');
+  if (!fs.existsSync(planPath)) {
+    throw new Error(`Plan no encontrado: ${planPath}. Buscado también en ./cloud_prep y .`);
+  }
   const plan = JSON.parse(fs.readFileSync(planPath, 'utf8'));
 
   const chunk = plan.chunks.find((c) => c.index === args.chunkIndex);
@@ -659,7 +677,7 @@ async function runChunk(args) {
     throw new Error(`Fragmento #${args.chunkIndex} no encontrado en ${planPath}.`);
   }
 
-  const introLastImgPath = path.join(workDir, 'intro_last.jpg');
+  const introLastImgPath = findFileFallback(path.join(workDir, 'intro_last.jpg'), 'intro_last.jpg');
   const chunkOutputPath =
     args.output || path.join(workDir, `part_chunk_${chunk.index}.mp4`);
   fs.mkdirSync(path.dirname(chunkOutputPath), { recursive: true });
@@ -979,7 +997,27 @@ async function runChunk(args) {
 
 async function runAssemble(args) {
   const workDir = args.workDir || path.dirname(args.plan || '.');
-  const planPath = args.plan || path.join(workDir, 'plan.json');
+  fs.mkdirSync(workDir, { recursive: true });
+
+  const findFileFallback = (primaryPath, filename) => {
+    if (primaryPath && fs.existsSync(primaryPath)) return primaryPath;
+    const candidates = [
+      path.join(workDir, filename),
+      path.join(process.cwd(), 'cloud_prep', filename),
+      path.join(process.cwd(), filename),
+      path.join(workDir, 'cloud_prep', filename),
+      path.join(process.cwd(), 'cloud_parts', filename),
+    ];
+    for (const cand of candidates) {
+      if (fs.existsSync(cand)) return cand;
+    }
+    return primaryPath;
+  };
+
+  const planPath = findFileFallback(args.plan || path.join(workDir, 'plan.json'), 'plan.json');
+  if (!fs.existsSync(planPath)) {
+    throw new Error(`Plan no encontrado para ensamblar: ${planPath}`);
+  }
   const plan = JSON.parse(fs.readFileSync(planPath, 'utf8'));
   const outputPath =
     args.output ||
@@ -988,7 +1026,7 @@ async function runAssemble(args) {
 
   const parts = [];
   if (plan.hasIntroVideoPart) {
-    const introPart = path.join(workDir, 'part_intro.mp4');
+    const introPart = findFileFallback(path.join(workDir, 'part_intro.mp4'), 'part_intro.mp4');
     if (!fs.existsSync(introPart)) {
       throw new Error(`Falta segmento de intro: ${introPart}`);
     }
@@ -996,7 +1034,8 @@ async function runAssemble(args) {
   }
 
   for (const c of plan.chunks) {
-    const chunkPart = path.join(workDir, `part_chunk_${c.index}.mp4`);
+    const chunkName = `part_chunk_${c.index}.mp4`;
+    const chunkPart = findFileFallback(path.join(workDir, chunkName), chunkName);
     if (!fs.existsSync(chunkPart)) {
       throw new Error(`Falta fragmento #${c.index}: ${chunkPart}`);
     }
@@ -1014,7 +1053,7 @@ async function runAssemble(args) {
     'utf8'
   );
 
-  const audioM4aPath = path.join(workDir, 'audio.m4a');
+  const audioM4aPath = findFileFallback(path.join(workDir, 'audio.m4a'), 'audio.m4a');
   const hasAudio = Boolean(plan.hasAudioFile && fs.existsSync(audioM4aPath));
 
   const t0 = Date.now();
